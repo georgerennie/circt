@@ -720,6 +720,8 @@ public:
       pred = "ugte";
     else if (pred == "sge")
       pred = "sgte";
+    else if (pred == "ceq")
+      pred = "eq";
 
     // Width of result is always 1 for comparison
     genSort("bitvec", 1);
