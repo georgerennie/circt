@@ -7,9 +7,17 @@
 //===----------------------------------------------------------------------===//
 
 #include "ImportVerilogInternals.h"
+#include "circt/Dialect/Comb/CombDialect.h"
+#include "circt/Dialect/Comb/CombOps.h"
+#include "circt/Dialect/Moore/MooreDialect.h"
+#include "circt/Dialect/SV/SVDialect.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/Transforms/DialectConversion.h"
 #include "slang/ast/Compilation.h"
 #include "slang/ast/SystemSubroutine.h"
 #include "llvm/ADT/ScopeExit.h"
+#include "mlir/IR/BuiltinDialect.h"
 
 using namespace mlir;
 using namespace circt;
@@ -17,6 +25,60 @@ using namespace ImportVerilog;
 
 // NOLINTBEGIN(misc-no-recursion)
 namespace {
+  struct LTLImplicationConversion : public OpConversionPattern<ltl::ImplicationOp> {
+  using OpConversionPattern<ltl::ImplicationOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ltl::ImplicationOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    // The logical rule: A -> B becomes (!A || B)
+    // The operands of the original op are available in the 'adaptor'.
+    Value a = op.getAntecedent(); // Left-hand side (A)
+    Value b = op.getConsequent(); // Right-hand side (B)
+
+    // Create !A. In hardware, this is typically an XOR with a constant 1.
+    Location loc = op.getLoc();
+    Value constOne = rewriter.create<hw::ConstantOp>(loc, rewriter.getI1Type(), 1);
+    Value notA = rewriter.create<comb::XorOp>(loc, a, constOne);
+
+    // Create (!A || B)
+    Value orResult = rewriter.create<comb::OrOp>(loc, notA, b);
+
+    // Replace the original ltl.implication op with the result of the OrOp.
+    rewriter.replaceOp(op, orResult);
+
+    return success();
+  }
+};
+
+struct AssertOpConversion : public OpConversionPattern<verif::AssertOp> {
+  using OpConversionPattern<verif::AssertOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(verif::AssertOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // The `adaptor` provides the operands of the original op *after* they
+    // have been converted by other patterns. In this case,
+    // adaptor.getProperty() will be the `i1` result from your
+    // LTLImplicationConversion.
+    Value newProperty = adaptor.getProperty();
+
+    // If the type is already what we want (i1), there's nothing to do.
+    // This check is important to avoid infinite recursion if the op is already legal.
+    // if (newProperty.getType() == op.getProperty().getType())
+    //   return failure();
+    llvm::outs() << "Converting AssertOp: " << op << "\n";
+    // Value newProperty = op.getProperty().getDefiningOp<mlir::UnrealizedConversionCastOp>().getInputs().front();
+    llvm::outs() << "newProperty: "<< newProperty << "\n";
+    // Create a new `verif.AssertOp` with the same attributes but with the
+    // new, converted `i1` property.
+    rewriter.replaceOpWithNewOp<verif::AssertOp>(
+        op, newProperty, /*enable=*/Value(), op.getLabelAttr());
+
+    return success();
+  }
+};
 struct StmtVisitor {
   Context &context;
   Location loc;
@@ -705,35 +767,159 @@ struct StmtVisitor {
     return success();
   }
 
-  // Handle concurrent assertion statements.
   LogicalResult visit(const slang::ast::ConcurrentAssertionStatement &stmt) {
-    auto loc = context.convertLocation(stmt.sourceRange);
-    auto property = context.convertAssertionExpression(stmt.propertySpec, loc);
-    if (!property)
-      return failure();
-
-    // Handle assertion statements that don't have an action block.
-    if (stmt.ifTrue && stmt.ifTrue->as_if<slang::ast::EmptyStatement>()) {
-      switch (stmt.assertionKind) {
-      case slang::ast::AssertionKind::Assert:
-        verif::AssertOp::create(builder, loc, property, Value(), StringAttr{});
-        return success();
-      case slang::ast::AssertionKind::Assume:
-        verif::AssumeOp::create(builder, loc, property, Value(), StringAttr{});
-        return success();
-      default:
-        break;
-      }
+  auto loc = context.convertLocation(stmt.sourceRange);
+  // 1. Convert the SystemVerilog property into an MLIR value.
+  //    Our simplification treats this complex temporal property as a simple boolean.
+  auto property = context.convertAssertionExpression(stmt.propertySpec, loc);
+  ltl::ClockOp clk = dyn_cast<circt::ltl::ClockOp>(property.getDefiningOp());
+  property = clk.getInput();
+  // llvm::outs() << "property: " << property << "\n";
+  if (!property)
+    return failure();
+  Operation* op;
+  switch (stmt.assertionKind) {
+    case slang::ast::AssertionKind::Assert:
+      op = verif::AssertOp::create(builder, loc, property, Value(), StringAttr{});
+      // return success();
+      break;
+    case slang::ast::AssertionKind::Assume:
+      op =  verif::AssumeOp::create(builder, loc, property, Value(), StringAttr{});
+      // return success();
+      break;
+    default:
       mlir::emitError(loc) << "unsupported concurrent assertion kind: "
-                           << slang::ast::toString(stmt.assertionKind);
+                          << slang::ast::toString(stmt.assertionKind);
       return failure();
     }
 
-    mlir::emitError(loc)
-        << "concurrent assertion statements with action blocks "
-           "are not supported yet";
-    return failure();
-  }
+//   // }
+//   ConversionTarget target(*context.getContext());
+//   target.addLegalDialect<hw::HWDialect>();
+//   target.addLegalDialect<comb::CombDialect>();
+//   target.addLegalDialect<sv::SVDialect>();
+//   target.addLegalDialect<seq::SeqDialect>();
+//   target.addLegalDialect<moore::MooreDialect>();
+//   target.addIllegalDialect<ltl::LTLDialect>();
+//   target.addLegalDialect<verif::VerifDialect>();
+//   target.addLegalDialect<mlir::BuiltinDialect>();
+//   target.addIllegalOp<verif::HasBeenResetOp>();
+//   RewritePatternSet patterns(context.getContext());
+//   mlir::TypeConverter converter;
+//  // Convert the ltl property type to a built-in type
+//   converter.addConversion([](IntegerType type) { return type; });
+//   converter.addConversion([](ltl::PropertyType type) {
+//     return IntegerType::get(type.getContext(), 1);
+//   });
+//   converter.addConversion([](ltl::SequenceType type) {
+//     return IntegerType::get(type.getContext(), 1);
+//   });
+
+//   // Basic materializations
+//   converter.addTargetMaterialization(
+//       [&](mlir::OpBuilder &builder, mlir::Type resultType,
+//           mlir::ValueRange inputs, mlir::Location loc) -> mlir::Value {
+//         if (inputs.size() != 1)
+//           return Value();
+//         return UnrealizedConversionCastOp::create(builder, loc, resultType,
+//                                                   inputs[0])
+//             ->getResult(0);
+//       });
+
+//   converter.addSourceMaterialization(
+//       [&](mlir::OpBuilder &builder, mlir::Type resultType,
+//           mlir::ValueRange inputs, mlir::Location loc) -> mlir::Value {
+//         if (inputs.size() != 1)
+//           return Value();
+//         return UnrealizedConversionCastOp::create(builder, loc, resultType,
+//                                                   inputs[0])
+//             ->getResult(0);
+//       });
+
+//   patterns.add<LTLImplicationConversion>(converter, patterns.getContext());
+//   patterns.add<AssertOpConversion>(converter, patterns.getContext());
+
+//   LogicalResult r = mlir::applyFullConversion({op, property.getDefiningOp() }, target, std::move(patterns) );
+//   if(failed(r)) {
+//     llvm::errs() << "Failed to convert property: " << property << "\n";
+//     return failure();
+//   }
+  // llvm::outs() << "property: " << property << "\n";
+  // Handle assertion statements that don't have an action block (original logic).
+  // if (stmt.ifTrue && stmt.ifTrue->as_if<slang::ast::EmptyStatement>()) {
+
+
+  // --- NEW LOGIC BORROWED FROM ImmediateAssertionStatement ---
+
+  // 2. Regard assertion statements with an action block as an "if-else".
+  //    First, ensure the property value is a boolean, then convert to i1 for branching.
+
+  // auto cond = context.convertToBool(property);
+  // llvm::outs() << "cond: " << cond << "\n";
+  // cond = moore::ConversionOp::create(builder, loc, builder.getI1Type(), cond);
+
+  // 3. Create the blocks for the true (pass) and false (fail) branches, and an exit block.
+  // Block &exitBlock = createBlock();
+  // Block *falseBlock = stmt.ifFalse ? &createBlock() : nullptr;
+  // Block &trueBlock = createBlock();
+  // // cf::CondBranchOp::create(builder, loc, cond, &trueBlock,
+  // //                          falseBlock ? falseBlock : &exitBlock);
+
+  // // 4. Generate the `true` (pass) branch. This is typically empty.
+  // builder.setInsertionPointToEnd(&trueBlock);
+  // if (stmt.ifTrue && failed(context.convertStatement(*stmt.ifTrue)))
+  //   return failure();
+  // if (!isTerminated())
+  //   cf::BranchOp::create(builder, loc, &exitBlock);
+
+  // // 5. Generate the `false` (fail) branch if it exists.
+  // if (stmt.ifFalse) {
+  //   builder.setInsertionPointToEnd(falseBlock);
+  //   if (failed(context.convertStatement(*stmt.ifFalse)))
+  //     return failure();
+  //   if (!isTerminated())
+  //     cf::BranchOp::create(builder, loc, &exitBlock);
+  // }
+
+  // // 6. Continue compilation from the exit block.
+  // if (exitBlock.hasNoPredecessors()) {
+  //   exitBlock.erase();
+  //   setTerminated();
+  // } else {
+  //   builder.setInsertionPointToEnd(&exitBlock);
+  // }
+  // exitBlock.dump();
+  return success();
+}
+  // Handle concurrent assertion statements.
+  // LogicalResult visit(const slang::ast::ConcurrentAssertionStatement &stmt) {
+  //   auto loc = context.convertLocation(stmt.sourceRange);
+  //   auto property = context.convertAssertionExpression(stmt.propertySpec, loc);
+  //   if (!property)
+  //     return failure();
+
+  //   // Handle assertion statements that don't have an action block.
+  //   if (stmt.ifTrue && stmt.ifTrue->as_if<slang::ast::EmptyStatement>()) {
+  //     switch (stmt.assertionKind) {
+  //     case slang::ast::AssertionKind::Assert:
+  //       verif::AssertOp::create(builder, loc, property, Value(), StringAttr{});
+  //       return success();
+  //     case slang::ast::AssertionKind::Assume:
+  //       verif::AssumeOp::create(builder, loc, property, Value(), StringAttr{});
+  //       return success();
+  //     default:
+  //       break;
+  //     }
+  //     mlir::emitError(loc) << "unsupported concurrent assertion kind: "
+  //                          << slang::ast::toString(stmt.assertionKind);
+  //     return failure();
+  //   }
+
+  //   mlir::emitError(loc)
+  //       << "concurrent assertion statements with action blocks "
+  //          "are not supported yet";
+  //   return failure();
+  // }
 
   /// Handle the subset of system calls that return no result value. Return
   /// true if the called system task could be handled, false otherwise. Return

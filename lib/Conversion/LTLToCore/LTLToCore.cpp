@@ -49,21 +49,23 @@ using namespace hw;
 
 namespace {
 
-struct LTLImplicationConversion : public OpConversionPattern<ltl::ImplicationOp> {
+struct LTLImplicationConversion
+    : public OpConversionPattern<ltl::ImplicationOp> {
   using OpConversionPattern<ltl::ImplicationOp>::OpConversionPattern;
 
   LogicalResult
   matchAndRewrite(ltl::ImplicationOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    
+
     // The logical rule: A -> B becomes (!A || B)
     // The operands of the original op are available in the 'adaptor'.
     Value a = op.getAntecedent(); // Left-hand side (A)
     Value b = op.getConsequent(); // Right-hand side (B)
-    
+
     // Create !A. In hardware, this is typically an XOR with a constant 1.
     Location loc = op.getLoc();
-    Value constOne = rewriter.create<hw::ConstantOp>(loc, rewriter.getI1Type(), 1);
+    Value constOne =
+        rewriter.create<hw::ConstantOp>(loc, rewriter.getI1Type(), 1);
     Value notA = rewriter.create<comb::XorOp>(loc, a, constOne);
 
     // Create (!A || B)
@@ -83,18 +85,19 @@ struct AssertOpConversion : public OpConversionPattern<verif::AssertOp> {
   matchAndRewrite(verif::AssertOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     // The `adaptor` provides the operands of the original op *after* they
-    // have been converted by other patterns. In this case, 
-    // adaptor.getProperty() will be the `i1` result from your 
+    // have been converted by other patterns. In this case,
+    // adaptor.getProperty() will be the `i1` result from your
     // LTLImplicationConversion.
     Value newProperty = adaptor.getProperty();
 
     // If the type is already what we want (i1), there's nothing to do.
-    // This check is important to avoid infinite recursion if the op is already legal.
-    // if (newProperty.getType() == op.getProperty().getType())
+    // This check is important to avoid infinite recursion if the op is already
+    // legal. if (newProperty.getType() == op.getProperty().getType())
     //   return failure();
     llvm::outs() << "Converting AssertOp: " << op << "\n";
-    // Value newProperty = op.getProperty().getDefiningOp<mlir::UnrealizedConversionCastOp>().getInputs().front();
-    llvm::outs() << "newProperty: "<< newProperty << "\n";         
+    // Value newProperty =
+    // op.getProperty().getDefiningOp<mlir::UnrealizedConversionCastOp>().getInputs().front();
+    llvm::outs() << "newProperty: " << newProperty << "\n";
     // Create a new `verif.AssertOp` with the same attributes but with the
     // new, converted `i1` property.
     rewriter.replaceOpWithNewOp<verif::AssertOp>(
@@ -104,8 +107,8 @@ struct AssertOpConversion : public OpConversionPattern<verif::AssertOp> {
   }
 };
 
-
-struct CombinationalConverter : public OpConversionPattern<llhd::CombinationalOp> {
+struct CombinationalConverter
+    : public OpConversionPattern<llhd::CombinationalOp> {
   using OpConversionPattern<llhd::CombinationalOp>::OpConversionPattern;
 
   LogicalResult
@@ -113,9 +116,8 @@ struct CombinationalConverter : public OpConversionPattern<llhd::CombinationalOp
                   ConversionPatternRewriter &rewriter) const override {
     llvm::outs() << "cloning: " << op << "\n";
 
-
-  rewriter.inlineBlockBefore(&op.getBody().front(), op, {});
-    op.erase();                 
+    rewriter.inlineBlockBefore(&op.getBody().front(), op, {});
+    op.erase();
     return success();
   }
 };
@@ -126,7 +128,7 @@ struct YieldConverter : public OpConversionPattern<llhd::YieldOp> {
   matchAndRewrite(llhd::YieldOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     llvm::outs() << "erasing: " << op << "\n";
-    op.erase();                 
+    op.erase();
     return success();
   }
 };
@@ -137,18 +139,18 @@ struct DelayConverter : public OpConversionPattern<llhd::DelayOp> {
   matchAndRewrite(llhd::DelayOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     llvm::outs() << "erasing: " << op << "\n";
-     if(op.getDelay().getEpsilon() != 0) {
+    if (op.getDelay().getEpsilon() != 0) {
       op->emitError() << "Delay with non-zero epsilon is not supported";
       return failure();
-     }  
-     Value clock;
-     for(auto arg : op->getBlock()->getArguments()){
-      if(arg.getType() == seq::ClockType) {
+    }
+    Value clock;
+    for (auto arg : op->getBlock()->getArguments()) {
+      if (isa<seq::ClockType>(arg.getType())) {
         clock = arg;
         break;
       }
-     }         
-    op.erase();                 
+    }
+    op.erase();
     return success();
   }
 };
@@ -228,17 +230,17 @@ void LowerLTLToCorePass::runOnOperation() {
   // target.addLegalDialect<ltl::LTLDialect>();
   target.addIllegalDialect<verif::VerifDialect>();
   target.addDynamicallyLegalOp<verif::AssertOp>([&](verif::AssertOp op) {
-  // The operation is legal if the type of its property operand
-  // is already what the type converter would produce.
-  // In this case, we are converting properties to i1.
-  return converter.isLegal(op.getProperty().getType());
-});
-target.addDynamicallyLegalOp<verif::AssumeOp>([&](verif::AssumeOp op) {
-  // The operation is legal if the type of its property operand
-  // is already what the type converter would produce.
-  // In this case, we are converting properties to i1.
-  return converter.isLegal(op.getProperty().getType());
-});
+    // The operation is legal if the type of its property operand
+    // is already what the type converter would produce.
+    // In this case, we are converting properties to i1.
+    return converter.isLegal(op.getProperty().getType());
+  });
+  target.addDynamicallyLegalOp<verif::AssumeOp>([&](verif::AssumeOp op) {
+    // The operation is legal if the type of its property operand
+    // is already what the type converter would produce.
+    // In this case, we are converting properties to i1.
+    return converter.isLegal(op.getProperty().getType());
+  });
   target.addIllegalOp<verif::HasBeenResetOp>();
   target.addIllegalDialect<llhd::LLHDDialect>();
   target.addLegalDialect<mlir::cf::ControlFlowDialect>();
@@ -284,10 +286,9 @@ target.addDynamicallyLegalOp<verif::AssumeOp>([&](verif::AssumeOp op) {
   patterns.add<DelayConverter>(converter, patterns.getContext());
 
   OpBuilder builder(&getContext());
-  
+
   // Apply the conversions
-  if (failed(
-          applyFullConversion(getOperation(), target, std::move(patterns))))
+  if (failed(applyFullConversion(getOperation(), target, std::move(patterns))))
     return signalPassFailure();
 }
 
