@@ -710,7 +710,7 @@ public:
     StringRef pred = stringifyICmpPredicate(op.getPredicate());
 
     // Check for special cases where hw doesn't align with btor syntax
-    if (pred == "ne")
+    if (pred == "ne" || pred == "cne")
       pred = "neq";
     else if (pred == "ule")
       pred = "ulte";
