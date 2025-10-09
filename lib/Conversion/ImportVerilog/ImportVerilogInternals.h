@@ -112,7 +112,7 @@ struct Context {
   LogicalResult convertFunction(const slang::ast::SubroutineSymbol &subroutine);
 
   // Convert a statement AST node to MLIR ops.
-  LogicalResult convertStatement(const slang::ast::Statement &stmt);
+  LogicalResult convertStatement(const slang::ast::Statement &stmt, const slang::ast::StatementBlockSymbol* blockSymbol = nullptr);
 
   // Convert an expression AST node to MLIR ops.
   Value convertRvalueExpression(const slang::ast::Expression &expr,

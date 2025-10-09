@@ -83,9 +83,10 @@ struct StmtVisitor {
   Context &context;
   Location loc;
   OpBuilder &builder;
+  const slang::ast::StatementBlockSymbol* blockSymbol;
 
-  StmtVisitor(Context &context, Location loc)
-      : context(context), loc(loc), builder(context.builder) {}
+  StmtVisitor(Context &context, Location loc, const slang::ast::StatementBlockSymbol* blockSymbol = nullptr)
+      : context(context), loc(loc), builder(context.builder), blockSymbol(blockSymbol) {}
 
   bool isTerminated() const { return !builder.getInsertionBlock(); }
   void setTerminated() { builder.clearInsertionPoint(); }
@@ -209,7 +210,7 @@ struct StmtVisitor {
 
   // Inline `begin ... end` blocks into the parent.
   LogicalResult visit(const slang::ast::BlockStatement &stmt) {
-    return context.convertStatement(stmt.body);
+    return context.convertStatement(stmt.body, stmt.blockSymbol);
   }
 
   // Handle expression statements.
@@ -697,7 +698,7 @@ struct StmtVisitor {
     return success();
   }
 
-  // Handle immediate assertion statements.
+  // Handle immediate assertioassertionName.
   LogicalResult visit(const slang::ast::ImmediateAssertionStatement &stmt) {
     auto cond = context.convertRvalueExpression(stmt.cond);
     cond = context.convertToBool(cond);
@@ -712,15 +713,17 @@ struct StmtVisitor {
       else if (stmt.isDeferred)
         defer = moore::DeferAssert::Observed;
 
+      auto assertionName = blockSymbol ? builder.getStringAttr(blockSymbol->name) : StringAttr{};
+
       switch (stmt.assertionKind) {
       case slang::ast::AssertionKind::Assert:
-        moore::AssertOp::create(builder, loc, defer, cond, StringAttr{});
+        moore::AssertOp::create(builder, loc, defer, cond, assertionName);
         return success();
       case slang::ast::AssertionKind::Assume:
-        moore::AssumeOp::create(builder, loc, defer, cond, StringAttr{});
+        moore::AssumeOp::create(builder, loc, defer, cond, assertionName);
         return success();
       case slang::ast::AssertionKind::CoverProperty:
-        moore::CoverOp::create(builder, loc, defer, cond, StringAttr{});
+        moore::CoverOp::create(builder, loc, defer, cond, assertionName);
         return success();
       default:
         break;
@@ -1066,9 +1069,9 @@ struct StmtVisitor {
 };
 } // namespace
 
-LogicalResult Context::convertStatement(const slang::ast::Statement &stmt) {
+LogicalResult Context::convertStatement(const slang::ast::Statement &stmt, const slang::ast::StatementBlockSymbol* blockSymbol) {
   assert(builder.getInsertionBlock());
   auto loc = convertLocation(stmt.sourceRange);
-  return stmt.visit(StmtVisitor(*this, loc));
+  return stmt.visit(StmtVisitor(*this, loc, blockSymbol));
 }
 // NOLINTEND(misc-no-recursion)
